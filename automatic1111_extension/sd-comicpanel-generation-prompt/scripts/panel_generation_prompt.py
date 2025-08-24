@@ -6,10 +6,11 @@ import gradio as gr
 from typing import List, Tuple
 
 from modules import scripts, processing, script_callbacks
+from modules.shared import state
 
 # Globals for filename suffixing
-_current_line_index = None
-_current_panel_code = None  # "h" | "v" | "s" | "n"
+_pending_suffixes: List[Tuple[int, str]] = []  # (line index, panel code)
+_callback_registered = False
 
 def _ceil_to_16(x: float) -> int:
     return int(math.ceil(x / 16.0) * 16)
@@ -26,18 +27,20 @@ def _ensure_panels_folder(outpath_samples: str) -> str:
 
 def _on_before_image_saved(params: script_callbacks.ImageSaveParams):
     """Append -<lineIndex>-<panelCode> and redirect folder to outputs/text2img-panels."""
-    global _current_line_index, _current_panel_code
-    if _current_line_index is None or _current_panel_code is None:
+    if not _pending_suffixes:
         return
+    line_idx, code = _pending_suffixes.pop(0)
     base = params.filename
-    params.filename = f"{base}-{_current_line_index}-{_current_panel_code}"
+    params.filename = f"{base}-{line_idx}-{code}"
     # Redirect folder
     tgt = _ensure_panels_folder(params.p.outpath_samples)
     params.p.outpath_samples = tgt
     params.p.outpath_grids = tgt
 
-# Register callback on import
-script_callbacks.on_before_image_saved(_on_before_image_saved)
+# Register callback on import once
+if not _callback_registered:
+    script_callbacks.on_before_image_saved(_on_before_image_saved)
+    _callback_registered = True
 
 class Script(scripts.Script):
     def title(self):
@@ -91,56 +94,70 @@ class Script(scripts.Script):
         return [enabled, prompts_box, chk_h, chk_v, chk_s, chk_n]
 
     def run(self, p, enabled: bool, prompts_box: str, chk_h: bool, chk_v: bool, chk_s: bool, chk_n: bool):
-        global _current_line_index, _current_panel_code
-
         if not enabled:
             # Pass-through if disabled
             return processing.process_images(p)
+
+        processing.fix_seed(p)
 
         lines = [ln.strip() for ln in (prompts_box or "").splitlines() if ln.strip()]
         if not lines:
             lines = [""]
         base = max(int(p.width), int(p.height))
 
-        all_images = []
-        infotexts = []
+        panel_jobs = []
+        if chk_h:
+            panel_jobs.append(("h", base, _ceil_to_16(base * 5.0 / 7.0)))
+        if chk_v:
+            panel_jobs.append(("v", _ceil_to_16(base * 5.0 / 7.0), base))
+        if chk_s:
+            panel_jobs.append(("s", base, base))
+        if chk_n:
+            panel_jobs.append(("n", base, _ceil_to_16(base * 5.0 / 14.0)))
 
-        for i, extra in enumerate(lines, start=1):
-            # Merge: positive prompt first, then the line
-            merged_prompt = f"{p.prompt or ''} {extra}".strip()
+        total_jobs = len(lines) * len(panel_jobs)
+        state.job_count = total_jobs
 
-            jobs = []
-            if chk_h:
-                w = base
-                h = _ceil_to_16(base * 5.0 / 7.0)
-                jobs.append(("h", w, h))
-            if chk_v:
-                h = base
-                w = _ceil_to_16(base * 5.0 / 7.0)
-                jobs.append(("v", w, h))
-            if chk_s:
-                w = base
-                h = base
-                jobs.append(("s", w, h))
-            if chk_n:
-                w = base
-                h = _ceil_to_16(base * 5.0 / 14.0)
-                jobs.append(("n", w, h))
+        _pending_suffixes.clear()
 
-            for code, w, h in jobs:
-                p2 = copy.copy(p)
-                p2.width = int(w)
-                p2.height = int(h)
-                p2.prompt = merged_prompt
+        all_images: List[object] = []
+        all_prompts: List[str] = []
+        all_seeds: List[int] = []
+        infotexts: List[str] = []
 
-                _current_line_index = i
-                _current_panel_code = code
+        seed_offset = 0
 
+        for code, w, h in panel_jobs:
+            p2 = copy.copy(p)
+            p2.width = int(w)
+            p2.height = int(h)
+            prompts = [f"{p.prompt or ''} {extra}".strip() for extra in lines]
+            seeds = [p.seed + seed_offset + i for i in range(len(prompts))]
+            p2.prompt = prompts
+            p2.seed = seeds
+            p2.n_iter = math.ceil(len(prompts) / p.batch_size)
+            p2.do_not_save_grid = True
+            p2.do_not_show_grid = True
+
+            _pending_suffixes.extend((i + 1, code) for i in range(len(prompts)))
+            try:
                 proc = processing.process_images(p2)
-                all_images.extend(proc.images)
-                infotexts.extend(proc.infotexts)
+            finally:
+                _pending_suffixes.clear()
 
-        _current_line_index = None
-        _current_panel_code = None
+            all_images.extend(proc.images)
+            all_prompts.extend(proc.all_prompts or prompts)
+            all_seeds.extend(proc.all_seeds or seeds)
+            infotexts.extend(proc.infotexts)
 
-        return processing.Processed(p, all_images, p.seed, infotexts=infotexts)
+            seed_offset += len(prompts)
+
+        seed = all_seeds[0] if all_seeds else p.seed
+        return processing.Processed(
+            p,
+            all_images,
+            seed,
+            all_seeds=all_seeds,
+            all_prompts=all_prompts,
+            infotexts=infotexts,
+        )
