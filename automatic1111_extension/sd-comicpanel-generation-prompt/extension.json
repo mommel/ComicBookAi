@@ -1,7 +1,7 @@
 {
-  "name": "Comic Panel Generation Prompt",
-  "version": "0.2.0",
-  "description": "Multiple AspectRatio Generation for ComicBook Panel Prompt Files",
-  "author": "ChatGPT (auto-generated)",
+  "name": "Comic Panel Generation Script",
+  "version": "1.0.0",
+  "description": "Generate Comic Panels (7:5, 1:1, 5:7, 5:14) with multiline prompt input",
+  "author": "Mommel",
   "license": "MIT"
 }
