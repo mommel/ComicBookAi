@@ -14,7 +14,7 @@ VARIANTEN = [
     ("1:1",  (1000, 1000), "s"), # square
     ("7:5",  (700,  500),  "h"), # horizontal
     ("5:7",  (500,  700),  "v"), # vertical
-    ("5:14", (500,  1000), "n"), # narrow
+    ("5:14", (500,  1400), "n"), # narrow
 ]
 
 os.makedirs(OUT_DIR, exist_ok=True)
